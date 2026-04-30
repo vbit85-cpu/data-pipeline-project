@@ -1,5 +1,0 @@
-name,department,salary,_errors,id
-NoID,IT,3000.0,id is null,
-BadSalary,IT,,salary invalid type: abc,6.0
-,HR,4500.0,name is null,7.0
-WrongType,IT,,salary invalid type: 5000.abc,8.0
