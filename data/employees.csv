@@ -1,5 +1,10 @@
 id,name,department,salary
-1,John,IT,5000
-2,Maria,HR,4000
-3,Alex,IT,5500
-4,Emma,Finance,6000
+1,Viktor,IT,10000
+2,Olena,Head,4000
+3,Valeriy,IT,5500
+4,Maria,Finance,6000
+5,Kyryl,Devops,2000
+,NoID,IT,3000
+6,BadSalary,IT,abc
+7,,HR,4500
+8,WrongType,IT,5000.abc

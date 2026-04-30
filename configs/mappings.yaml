@@ -1,0 +1,125 @@
+files:
+  entities:
+    path: entities.csv
+    table: entities
+    primary_key: ent_id
+    depends_on: []
+    columns:
+      source_id:
+        type: int
+        required: true
+      ent_name:
+        type: string
+        required: true
+
+  agents:
+    path: agents.csv
+    table: agents
+    primary_key: ag_id
+    depends_on: []
+    columns:
+      source_id:
+        type: int
+        required: true
+      parent_id:
+        type: int
+        required: false
+      ag_name:
+        type: string
+        required: true
+
+  users:
+    path: users.csv
+    table: users
+    primary_key: userID
+    depends_on: []
+    columns:
+      source_id:
+        type: int
+        required: true
+      userName:
+        type: string
+        required: true
+      Email:
+        type: string
+        required: false
+
+  employees:
+    path: employees.csv
+    table: employees
+    primary_key: id
+    depends_on: []
+    columns:
+      source_id:
+        type: int
+        required: true
+      name:
+        type: string
+        required: true
+      department:
+        type: string
+        required: false
+      salary:
+        type: float
+        required: true
+    transformations:
+      - type: multiply
+        column: salary
+        value: 1.1
+
+  orders:
+    path: orders.csv
+    table: orders
+    primary_key: id
+    depends_on:
+      - entities
+      - agents
+    columns:
+      source_id:
+        type: int
+        required: true
+      ent_id:
+        type: int
+        required: true
+      order_qty:
+        type: float
+        required: false
+      price:
+        type: float
+        required: false
+      order_sum:
+        type: float
+        required: true
+      ag_id:
+        type: int
+        required: true
+      ag_ch_id:
+        type: int
+        required: true
+
+  incomes:
+    path: incomes.csv
+    table: incomes
+    primary_key: id
+    depends_on:
+      - entities
+      - agents
+    columns:
+      source_id:
+        type: int
+        required: true
+      ent_id:
+        type: int
+        required: true
+      ag_id:
+        type: int
+        required: true
+      income_qty:
+        type: float
+        required: false
+      income_price:
+        type: float
+        required: false
+      income_sum:
+        type: float
+        required: false
