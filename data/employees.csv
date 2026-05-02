@@ -1,10 +1,13 @@
 id,name,department,salary
-1,Viktor,IT,10000
-2,Olena,Head,4000
-3,Valeriy,IT,5500
-4,Maria,Finance,6000
-5,Kyryl,Devops,2000
+1,John Smith,Engineering,1000.0
+2,Mary Johnson Small,Sales,1500.0
+3,Alex Brown,,1200.0
+4,Viktor Brechko,IT,10000
+5,Olena,Head,4000
+6,Valeriy,IT,5500
+7,Maria,Finance,6000
+8,Kyryl,Devops,2000
 ,NoID,IT,3000
-6,BadSalary,IT,abc
-7,,HR,4500
+10,BadSalary,IT,abc
+11,,HR,4500
 8,WrongType,IT,5000.abc

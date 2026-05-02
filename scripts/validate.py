@@ -7,18 +7,18 @@ TYPE_MAP = {
 }
 
 
-# --- 1. Проверка структуры (DataFrame уровень) ---
+# ---1. Structure check (DataFrame level) ---
 def validate_schema(df: pd.DataFrame, config: dict):
     errors = []
 
     expected_cols = config["columns"]
 
-    # Проверка наличия колонок
+    # Checking the presence of columns
     for col in expected_cols:
         if col not in df.columns:
             errors.append(f"Missing column: {col}")
 
-    # Проверка лишних колонок
+    # Checking extra columns
     for col in df.columns:
         if col not in expected_cols:
             errors.append(f"Unexpected column: {col}")
@@ -26,7 +26,7 @@ def validate_schema(df: pd.DataFrame, config: dict):
     return errors
 
 
-# --- 2. Проверка одной строки ---
+# --- 2. Checking one line ---
 def validate_and_cast_row(row, columns_config):
     clean_row = {}
     errors = []
@@ -39,12 +39,12 @@ def validate_and_cast_row(row, columns_config):
             errors.append(f"{col} is null")
             continue
 
-        # если не required и пусто
+        # if not required and empty
         if pd.isnull(value) or value == "":
             clean_row[col] = None
             continue
 
-        # тип
+        # type
         expected_type = rules.get("type")
         caster = TYPE_MAP.get(expected_type)
 
@@ -67,8 +67,7 @@ def validate_and_cast_row(row, columns_config):
     return clean_row, errors
 
 
-# --- 3. Разделение valid / invalid ---
-def split_valid_invalid(df: pd.DataFrame, config: dict):
+def split_valid_invalid_old(df: pd.DataFrame, config: dict):
     valid_rows = []
     invalid_rows = []
 
@@ -82,6 +81,34 @@ def split_valid_invalid(df: pd.DataFrame, config: dict):
             invalid_rows.append(clean_row)
         else:
             valid_rows.append(clean_row)
+
+    valid_df = pd.DataFrame(valid_rows)
+    invalid_df = pd.DataFrame(invalid_rows)
+
+    return valid_df, invalid_df
+
+def split_valid_invalid(df: pd.DataFrame, config: dict):
+    valid_rows = []
+    invalid_rows = []
+
+    columns_config = config["columns"]
+
+    for _, row in df.iterrows():
+        errors = []
+
+        for column, rules in columns_config.items():
+            required = rules.get("required", False)
+
+            if required and pd.isna(row[column]):
+                errors.append(f"{column} is required or has invalid type")
+
+        row_dict = row.to_dict()
+
+        if errors:
+            row_dict["_errors"] = "; ".join(errors)
+            invalid_rows.append(row_dict)
+        else:
+            valid_rows.append(row_dict)
 
     valid_df = pd.DataFrame(valid_rows)
     invalid_df = pd.DataFrame(invalid_rows)

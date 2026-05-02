@@ -1,10 +1,11 @@
 import sys
 sys.path.append("/opt/airflow")
+sys.path.append("/opt/airflow/scripts")
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
-from scripts.etl import run_etl
+from pipeline import run_pipeline
 
 default_args = {
     "owner": "airflow",
@@ -21,5 +22,6 @@ with DAG(
 
     task_etl = PythonOperator(
         task_id="run_etl",
-        python_callable=run_etl
+        python_callable=run_pipeline,
+        dag=dag
     )

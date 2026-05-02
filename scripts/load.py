@@ -3,30 +3,29 @@ import os
 import time
 import pandas as pd
 import psycopg2
+from utils import get_connection
 from psycopg2.extras import execute_values
 
 
-def get_connection():
-    """
-    Create DB connection with retry logic.
-    """
+#def get_connection():
+ #   Create DB connection with retry logic.
 
-    for attempt in range(5):
-        try:
-            conn = psycopg2.connect(
-                host=os.getenv("DB_HOST", "localhost"),
-                database="airflow",
-                user="airflow",
-                password="airflow",
-                port=5432
-            )
-            return conn
+  #  for attempt in range(5):
+   #     try:
+     #       conn = psycopg2.connect(
+    #            host=os.getenv("DB_HOST", "localhost"),
+      #          database="airflow",
+       #         user="airflow",
+        #        password="airflow",
+         #       port=5432
+          #  )
+           # return conn
 
-        except Exception as e:
-            logging.warning(f"DB connection failed (attempt {attempt+1}): {e}")
-            time.sleep(2)
+#        except Exception as e:
+ #           logging.warning(f"DB connection failed (attempt {attempt+1}): {e}")
+  #          time.sleep(2)
 
-    raise Exception("Could not connect to database after retries")
+#    raise Exception("Could not connect to database after retries")
 
 
 #def get_connection():
@@ -38,6 +37,37 @@ def get_connection():
 #        user="airflow",
 #        password="airflow"
 #    )
+
+def append_to_postgres(df, table_name, batch_id):
+    if df.empty:
+        return
+
+    df = df.copy()
+    df["batch_id"] = str(batch_id)
+
+    df = df.astype(object)
+    df = df.where(pd.notnull(df), None)
+
+    columns = list(df.columns)
+
+    query = f"""
+        INSERT INTO {table_name} ({", ".join(columns)})
+        VALUES %s
+    """
+    values = list(df.itertuples(index=False, name=None))
+    #values = [tuple(row) for row in df[columns].to_numpy()]
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cur:
+            execute_values(cur, query, values)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def load_to_postgres(df, table_name, batch_size=1000):
     """
@@ -97,6 +127,8 @@ def load_to_postgres(df, table_name, batch_size=1000):
     finally:
         cursor.close()
         conn.close()
+
+
 
 """
 def load_to_postgres(df, table):
