@@ -43,8 +43,6 @@ def mark_batch_failed(context):
     else:
         error_message = f"Task failed: {ti.task_id}, state={ti.state}"
 
-    #error_message = str(exception) if exception else "Unknown Airflow task failure"
-
     fail_existing_batch(batch_id, error_message)
 
 
@@ -94,7 +92,7 @@ with DAG(
                 },
             )
 
-     # ---------- CORE ----------
+     # ---------- CORE -----------
     with TaskGroup(group_id="core") as core_group:
         for file_name in files_config.keys():
             core_tasks[file_name] = PythonOperator(
@@ -118,30 +116,3 @@ with DAG(
 
     for task in core_tasks.values():
         task >> finish_batch
-
-
-#    previous_task = start_batch
-
-#    for level_index, level in enumerate(levels):
-#        staging_task = PythonOperator(
-#            task_id=f"load_staging_level_{level_index}",
-#            python_callable=load_staging_level,
-#            op_kwargs={
-#                "level_index": level_index,
-#                "batch_id": "{{ ti.xcom_pull(task_ids='start_batch') }}",
- #           },
- #       )
-
- #       core_task = PythonOperator(
-  #          task_id=f"load_core_level_{level_index}",
-   #         python_callable=load_core_level,
-   #         op_kwargs={
-   #             "level_index": level_index,
-    #            "batch_id": "{{ ti.xcom_pull(task_ids='start_batch') }}",
-    #        },
-     #   )
-
-   #     previous_task >> staging_task >> core_task
-    #    previous_task = core_task
-
-  #  previous_task >> finish_batch
