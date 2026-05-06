@@ -92,7 +92,7 @@ with DAG(
                 },
             )
 
-     # ---------- CORE ----------
+     # ---------- CORE -----------
     with TaskGroup(group_id="core") as core_group:
         for file_name in files_config.keys():
             core_tasks[file_name] = PythonOperator(
