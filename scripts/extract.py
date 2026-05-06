@@ -3,6 +3,25 @@ import pandas as pd
 def extract_csv(path):
     return pd.read_csv(path)
 
+def normalize_columns(df, cfg):
+    df = df.copy()
+
+    rename_map = {}
+
+    primary_key = cfg.get("primary_key")
+    if primary_key:
+        rename_map[primary_key] = "source_id"
+
+    for target_col, meta in cfg["columns"].items():
+        source_col = meta.get("source")
+
+        if source_col:
+            rename_map[source_col] = target_col
+
+    df.rename(columns=rename_map, inplace=True)
+
+    return df
+
 def apply_types(df, cfg):
     df = df.copy()
 

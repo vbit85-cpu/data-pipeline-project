@@ -6,6 +6,7 @@ files:
     depends_on: []
     columns:
       source_id:
+        source: ent_id
         type: int
         required: true
       ent_name:
@@ -19,6 +20,7 @@ files:
     depends_on: []
     columns:
       source_id:
+        source: ag_id
         type: int
         required: true
       parent_id:
@@ -35,12 +37,15 @@ files:
     depends_on: []
     columns:
       source_id:
+        source: userID
         type: int
         required: true
-      userName:
+      username:
+        source: userName
         type: string
         required: true
-      Email:
+      email:
+        source: Email
         type: string
         required: false
 
@@ -51,6 +56,7 @@ files:
     depends_on: []
     columns:
       source_id:
+        source: id
         type: int
         required: true
       name:
@@ -76,6 +82,7 @@ files:
       - agents
     columns:
       source_id:
+        source: id
         type: int
         required: true
       ent_id:
@@ -106,6 +113,7 @@ files:
       - agents
     columns:
       source_id:
+        source: id
         type: int
         required: true
       ent_id:

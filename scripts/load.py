@@ -1,73 +1,171 @@
+import io
+import re
+
 import logging
 import os
 import time
 import pandas as pd
-import psycopg2
+from psycopg2 import sql
 from utils import get_connection
 from psycopg2.extras import execute_values
 
 
-#def get_connection():
- #   Create DB connection with retry logic.
-
-  #  for attempt in range(5):
-   #     try:
-     #       conn = psycopg2.connect(
-    #            host=os.getenv("DB_HOST", "localhost"),
-      #          database="airflow",
-       #         user="airflow",
-        #        password="airflow",
-         #       port=5432
-          #  )
-           # return conn
-
-#        except Exception as e:
- #           logging.warning(f"DB connection failed (attempt {attempt+1}): {e}")
-  #          time.sleep(2)
-
-#    raise Exception("Could not connect to database after retries")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-#def get_connection():
- #   Create PostgreSQL connection.
-#    IMPORTANT: host must match docker-compose service name
-#    return psycopg2.connect(
-#        host="localhost",
-#        database="airflow",
-#        user="airflow",
-#        password="airflow"
-#    )
+def _validate_identifier(identifier: str):
+    """
+    Protects dynamic SQL identifiers like table names and column names.
 
-def append_to_postgres(df, table_name, batch_id):
+    PostgreSQL identifiers should not be blindly interpolated into SQL strings.
+    This validation is intentionally strict.
+    """
+    if not _IDENTIFIER_RE.match(identifier):
+        raise ValueError(f"Unsafe SQL identifier: {identifier}")
+
+
+def _prepare_dataframe_for_load(df: pd.DataFrame, batch_id):
+    """
+    Adds batch_id and converts pandas NA/NaN values into None-compatible form.
+
+    PostgreSQL COPY will receive missing values as \\N.
+    """
+    if df.empty:
+        return df.copy()
+
+    prepared_df = df.copy()
+    prepared_df["batch_id"] = str(batch_id)
+
+    prepared_df = prepared_df.astype(object)
+    prepared_df = prepared_df.where(pd.notnull(prepared_df), None)
+
+    return prepared_df
+
+
+def copy_to_postgres(df: pd.DataFrame, table_name: str, batch_id, columns_config=None):
+    """
+    Bulk-loads dataframe into PostgreSQL using COPY.
+
+    This function is intended for staging tables only:
+        stg_entities
+        stg_agents
+        stg_orders
+        ...
+
+    """
+
     if df.empty:
         return
 
-    df = df.copy()
-    df["batch_id"] = str(batch_id)
+    _validate_identifier(table_name)
 
-    df = df.astype(object)
-    df = df.where(pd.notnull(df), None)
+    prepared_df = _prepare_dataframe_for_load(df, batch_id)
 
-    columns = list(df.columns)
+    if columns_config:
+        for column, meta in columns_config.items():
+            if column not in prepared_df.columns:
+                continue
 
-    query = f"""
-        INSERT INTO {table_name} ({", ".join(columns)})
-        VALUES %s
-    """
-    values = list(df.itertuples(index=False, name=None))
-    #values = [tuple(row) for row in df[columns].to_numpy()]
+            if meta.get("type") == "int":
+                prepared_df[column] = prepared_df[column].apply(
+                    lambda x: None if pd.isna(x) else str(int(x))
+                )
+
+            elif meta.get("type") == "float":
+                prepared_df[column] = prepared_df[column].apply(
+                    lambda x: None if pd.isna(x) else str(float(x))
+                )
+
+            elif meta.get("type") == "string":
+                prepared_df[column] = prepared_df[column].apply(
+                    lambda x: None if pd.isna(x) else str(x)
+                )
+
+    columns = list(prepared_df.columns)
+
+    for column in columns:
+        _validate_identifier(column)
+
+    buffer = io.StringIO()
+
+    prepared_df.to_csv(
+        buffer,
+        index=False,
+        header=True,
+        na_rep="\\N",
+    )
+
+    buffer.seek(0)
 
     conn = get_connection()
 
     try:
         with conn.cursor() as cur:
-            execute_values(cur, query, values)
+            copy_sql = sql.SQL("""
+                COPY {table_name} ({columns})
+                FROM STDIN
+                WITH (
+                    FORMAT CSV,
+                    HEADER TRUE,
+                    NULL '\\N'
+                )
+            """).format(
+                table_name=sql.Identifier(table_name),
+                columns=sql.SQL(", ").join(
+                    sql.Identifier(column) for column in columns
+                ),
+            )
+
+            cur.copy_expert(copy_sql.as_string(conn), buffer)
+
         conn.commit()
+
     except Exception:
         conn.rollback()
         raise
+
     finally:
         conn.close()
+
+def append_to_postgres(df: pd.DataFrame, table_name: str, batch_id):
+    if df.empty:
+        return
+
+    _validate_identifier(table_name)
+    prepared_df = _prepare_dataframe_for_load(df, batch_id)
+
+    columns = list(prepared_df.columns)
+
+    for column in columns:
+        _validate_identifier(column)
+
+    query = sql.SQL("""
+        INSERT INTO {table_name} ({columns})
+        VALUES %s
+    """).format(
+        table_name=sql.Identifier(table_name),
+        columns=sql.SQL(", ").join(
+            sql.Identifier(column) for column in columns
+        ),
+    )
+
+    values = list(prepared_df.itertuples(index=False, name=None))
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cur:
+            execute_values(cur, query.as_string(conn), values)
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
 
 def load_to_postgres(df, table_name, batch_size=1000):
     """
@@ -130,25 +228,3 @@ def load_to_postgres(df, table_name, batch_size=1000):
 
 
 
-"""
-def load_to_postgres(df, table):
-
-    conn = psycopg2.connect(
-        host="localhost",
-        database="airflow",
-        user="airflow",
-        password="airflow"
-    )
-    cur = conn.cursor()
-
-    for _, row in df.iterrows():
-        cols = ",".join(row.index)
-        vals = ",".join(["%s"] * len(row))
-
-        query = f"INSERT INTO {table} ({cols}) VALUES ({vals})"
-        cur.execute(query, tuple(row))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-"""

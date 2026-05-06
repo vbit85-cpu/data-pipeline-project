@@ -1,5 +1,5 @@
 from utils import get_connection
-
+from quality import record_passed_check, record_failed_check
 
 def _execute(conn, query, table_name, params=None):
     with conn.cursor() as cur:
@@ -9,43 +9,86 @@ def _execute(conn, query, table_name, params=None):
     print(f"[CORE LOAD] {table_name}: {affected} rows affected")
 
 
-def check_duplicates(conn, staging_table, key_column="source_id"):
+def check_duplicates(conn, staging_table, batch_id, key_column="source_id"):
     query = f"""
         SELECT {key_column}, COUNT(*)
         FROM {staging_table}
+        WHERE batch_id = %s
         GROUP BY {key_column}
         HAVING COUNT(*) > 1
         ORDER BY COUNT(*) DESC;
     """
 
     with conn.cursor() as cur:
-        cur.execute(query)
+        cur.execute(query, (str(batch_id),))
         rows = cur.fetchall()
 
+    check_name = "duplicates_in_staging"
+
     if rows:
+        details = [
+            {key_column: row[0], "count": row[1]}
+            for row in rows[:20]
+        ]
+
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=staging_table,
+            check_name=check_name,
+            severity="warning",
+            failed_count=len(rows),
+            details=details,
+            conn=conn,
+        )
+
         print(f"[DUPLICATES] {staging_table}: {len(rows)} duplicated keys found")
         for row in rows[:10]:
             print(f"  {key_column}={row[0]}, count={row[1]}")
+    else:
+        record_passed_check(
+            batch_id=batch_id,
+            table_name=staging_table,
+            check_name=check_name,
+            severity="warning",
+            conn=conn,
+        )
 
     return rows
 
 
-def check_missing_references(conn, staging_table, source_column, ref_table, ref_source_column="source_id"):
+def check_missing_references(conn, staging_table, source_column, ref_table, batch_id, ref_source_column="source_id"):
     query = f"""
         SELECT s.{source_column}, COUNT(*)
         FROM {staging_table} s
         LEFT JOIN {ref_table} r
             ON s.{source_column} = r.{ref_source_column}
         WHERE r.{ref_source_column} IS NULL
+          AND s.batch_id = %s
         GROUP BY s.{source_column}
         ORDER BY COUNT(*) DESC;
     """
 
     with conn.cursor() as cur:
-        cur.execute(query)
+        cur.execute(query, (str(batch_id),))
         rows = cur.fetchall()
 
+    check_name = f"missing_reference_{source_column}_to_{ref_table}_{ref_source_column}"
+
     if rows:
+        details = [
+            {"missing_value": row[0], "count": row[1]}
+            for row in rows[:20]
+        ]
+
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=staging_table,
+            check_name=check_name,
+            severity="critical",
+            failed_count=len(rows),
+            details=details,
+            conn=conn,
+        )
         print(
             f"[MISSING REFERENCES] {staging_table}.{source_column} "
             f"→ {ref_table}.{ref_source_column}: {len(rows)} missing keys"
@@ -53,11 +96,78 @@ def check_missing_references(conn, staging_table, source_column, ref_table, ref_
         for row in rows[:10]:
             print(f"  missing {source_column}={row[0]}, count={row[1]}")
 
+    else:
+        record_passed_check(
+            batch_id=batch_id,
+            table_name=staging_table,
+            check_name=check_name,
+            severity="critical",
+            conn=conn,
+        )
+
     return rows
 
+def check_invalid_agent_pairs(conn, batch_id):
+    query = """
+        SELECT
+            s.source_id,
+            s.ag_id,
+            s.ag_ch_id
+        FROM stg_orders s
+        LEFT JOIN agents parent_ag
+            ON s.ag_id = parent_ag.source_id
+        LEFT JOIN agents child_ag
+            ON s.ag_ch_id = child_ag.source_id
+        WHERE s.batch_id = %s
+          AND (
+              parent_ag.id IS NULL
+              OR child_ag.id IS NULL
+              OR child_ag.parent_id IS DISTINCT FROM parent_ag.id
+          );
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(query, (str(batch_id),))
+        rows = cur.fetchall()
+
+    check_name = "invalid_agent_parent_child_pair"
+
+    if rows:
+        details = [
+            {
+                "order_source_id": row[0],
+                "ag_id": row[1],
+                "ag_ch_id": row[2],
+            }
+            for row in rows[:20]
+        ]
+
+        record_failed_check(
+            batch_id=batch_id,
+            table_name="stg_orders",
+            check_name=check_name,
+            severity="critical",
+            failed_count=len(rows),
+            details=details,
+            conn=conn,
+        )
+
+        print(f"[INVALID AGENT PAIRS] stg_orders: {len(rows)} invalid pairs found")
+        for row in rows[:10]:
+            print(f"  order_source_id={row[0]}, ag_id={row[1]}, ag_ch_id={row[2]}")
+    else:
+        record_passed_check(
+            batch_id=batch_id,
+            table_name="stg_orders",
+            check_name=check_name,
+            severity="critical",
+            conn=conn,
+        )
+
+    return rows
 
 def load_entities_core(conn, batch_id):
-    check_duplicates(conn, "stg_entities")
+    check_duplicates(conn, "stg_entities", batch_id)
 
     query = """
         WITH latest AS (
@@ -80,7 +190,7 @@ def load_entities_core(conn, batch_id):
 
 
 def load_agents_core(conn, batch_id):
-    check_duplicates(conn, "stg_agents")
+    check_duplicates(conn, "stg_agents", batch_id)
 
     insert_query = """
         WITH latest AS (
@@ -127,33 +237,33 @@ def load_agents_core(conn, batch_id):
 
 
 def load_users_core(conn, batch_id):
-    check_duplicates(conn, "stg_users")
+    check_duplicates(conn, "stg_users", batch_id)
 
     query = """
         WITH latest AS (
             SELECT DISTINCT ON (source_id)
                 source_id,
-                userName,
-                Email
+                username,
+                email
             FROM stg_users
             WHERE source_id IS NOT NULL
               AND batch_id = %s
             ORDER BY source_id, loaded_at DESC, stg_id DESC
         )
-        INSERT INTO users (source_id, userName, Email)
-        SELECT source_id, userName, Email
+        INSERT INTO users (source_id, username, email)
+        SELECT source_id, username, email
         FROM latest
         ON CONFLICT (source_id) DO UPDATE
         SET
-            userName = EXCLUDED.userName,
-            Email = EXCLUDED.Email;
+            username = EXCLUDED.username,
+            email = EXCLUDED.email;
     """
 
     _execute(conn, query, "users", (str(batch_id),))
 
 
 def load_employees_core(conn, batch_id):
-    check_duplicates(conn, "stg_employees")
+    check_duplicates(conn, "stg_employees", batch_id)
 
     query = """
         WITH latest AS (
@@ -181,40 +291,21 @@ def load_employees_core(conn, batch_id):
 
 
 def load_orders_core(conn, batch_id):
-    check_duplicates(conn, "stg_orders")
+    check_duplicates(conn, "stg_orders", batch_id)
 
-    missing_entities = check_missing_references(conn, "stg_orders", "ent_id", "entities")
-    missing_agents = check_missing_references(conn, "stg_orders", "ag_id", "agents")
-    missing_agents_child = check_missing_references(conn, "stg_orders", "ag_ch_id", "agents")
+    missing_entities = check_missing_references(conn, "stg_orders", "ent_id", "entities", batch_id)
+    missing_agents = check_missing_references(conn, "stg_orders", "ag_id", "agents", batch_id)
+    missing_agents_child = check_missing_references(conn, "stg_orders", "ag_ch_id", "agents", batch_id)
+
+    invalid_agent_pairs = check_invalid_agent_pairs(conn, batch_id)
 
     if missing_entities or missing_agents or missing_agents_child:
         raise ValueError("Cannot load orders core: missing references found")
 
-    invalid_agent_pairs_query = """
-        SELECT
-           s.source_id,
-           s.ag_id,
-           s.ag_ch_id
-        FROM stg_orders s
-        LEFT JOIN agents parent_ag
-            ON s.ag_id = parent_ag.source_id
-        LEFT JOIN agents child_ag
-            ON s.ag_ch_id = child_ag.source_id
-        WHERE parent_ag.id IS NULL
-           OR child_ag.id IS NULL
-           OR child_ag.parent_id IS DISTINCT FROM parent_ag.id;
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(invalid_agent_pairs_query)
-        invalid_pairs = cur.fetchall()
-
-    if invalid_pairs:
-        print(f"[INVALID AGENT PAIRS] stg_orders: {len(invalid_pairs)} invalid pairs found")
-        for row in invalid_pairs[:10]:
-            print(f"  order_source_id={row[0]}, ag_id={row[1]}, ag_ch_id={row[2]}")
-
+    if invalid_agent_pairs:
+        conn.commit()
         raise ValueError("Cannot load orders core: invalid ag_id/ag_ch_id parent-child pairs found")
+
 
     query = """
         WITH latest AS (
@@ -269,10 +360,10 @@ def load_orders_core(conn, batch_id):
     _execute(conn, query, "orders", (str(batch_id),))
 
 def load_incomes_core(conn, batch_id):
-    check_duplicates(conn, "stg_incomes")
+    check_duplicates(conn, "stg_incomes", batch_id)
 
-    missing_entities = check_missing_references(conn, "stg_incomes", "ent_id", "entities")
-    missing_agents = check_missing_references(conn, "stg_incomes", "ag_id", "agents")
+    missing_entities = check_missing_references(conn, "stg_incomes", "ent_id", "entities", batch_id)
+    missing_agents = check_missing_references(conn, "stg_incomes", "ag_id", "agents", batch_id)
 
     if missing_entities or missing_agents:
         raise ValueError("Cannot load incomes core: missing references found")
