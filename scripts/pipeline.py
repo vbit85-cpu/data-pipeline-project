@@ -1,98 +1,300 @@
 import os
 import logging
-
 import uuid
+
 from audit import start_batch, finish_batch, fail_batch
 from graph import DependencyGraph
 from utils import load_config, save_bad_records
-from extract import extract_csv, apply_types
+from extract import extract_csv, normalize_columns, apply_types
 from transform import apply_transformations
-from load import append_to_postgres
-from core_loader import load_core_by_levels
+from load import copy_to_postgres
+from core_loader import load_core_by_table
 from logger import setup_logger
 from validate import validate_schema, split_valid_invalid
+from quality import record_failed_check, record_passed_check
+from config_contract import validate_mappings_contract
+from ddl_generator import ensure_staging_tables
+
+def run_preflight():
+    logger = setup_logger()
+
+    logger.info("Running pipeline preflight checks")
+
+    config = load_config()
+
+    validate_mappings_contract(config)
+    logger.info("Mappings contract validation passed")
+
+    ensure_staging_tables(config)
+    logger.info("Staging tables ensured")
+
+    return True
+
+def get_execution_plan():
+    config = load_config()
+    validate_mappings_contract(config)
+
+    graph = DependencyGraph(config)
+    levels = graph.get_levels()
+    return config, levels
+
+def create_batch():
+    batch_id = uuid.uuid4()
+    start_batch(batch_id)
+    return str(batch_id)
+
+def finish_existing_batch(batch_id):
+    finish_batch(batch_id)
 
 
-def run_pipeline():
+def fail_existing_batch(batch_id, error_message):
+    fail_batch(batch_id, error_message)
+
+def process_file_to_staging(name, cfg, batch_id):
+    logger = setup_logger()
+    base_path = os.getenv("DATA_PATH", "data")
+    table_name = cfg["table"]
+
+    logger.info(f"Processing file: {name}, batch_id={batch_id}")
+
+    path = os.path.join(base_path, cfg["path"])
+
+    if not os.path.isfile(path):
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="file_exists",
+            severity="critical",
+            failed_count=1,
+            details={"path": path},
+        )
+        raise FileNotFoundError(f"File not found: {path}")
+
+    record_passed_check(
+        batch_id=batch_id,
+        table_name=table_name,
+        check_name="file_exists",
+        severity="critical",
+    )
+
+    if os.path.getsize(path) == 0:
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="file_not_empty",
+            severity="critical",
+            failed_count=1,
+            details={"path": path},
+        )
+        raise ValueError(f"Empty file: {path}")
+
+    record_passed_check(
+        batch_id=batch_id,
+        table_name=table_name,
+        check_name="file_not_empty",
+        severity="critical",
+    )
+
+    df = extract_csv(path)
+
+    pk = cfg.get("primary_key")
+
+    if pk not in df.columns:
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="primary_key_exists",
+            severity="critical",
+            failed_count=1,
+            details={"primary_key": pk, "columns": list(df.columns)},
+        )
+        raise ValueError(f"Primary key '{pk}' not found in file {name}")
+
+    record_passed_check(
+        batch_id=batch_id,
+        table_name=table_name,
+        check_name="primary_key_exists",
+        severity="critical",
+    )
+
+
+#    df.rename(columns={pk: "source_id"}, inplace=True)
+
+    df = normalize_columns(df, cfg)
+
+    df = apply_types(df, cfg)
+
+    errors = validate_schema(df, cfg)
+
+    if errors:
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="schema_validation",
+            severity="critical",
+            failed_count=len(errors),
+            details=errors,
+        )
+        raise ValueError(f"Schema errors in {name}: {errors}")
+
+    record_passed_check(
+        batch_id=batch_id,
+        table_name=table_name,
+        check_name="schema_validation",
+        severity="critical",
+    )
+
+    valid_df, invalid_df = split_valid_invalid(df, cfg)
+
+    if not invalid_df.empty:
+        logger.warning(f"{len(invalid_df)} bad records in {name}")
+        save_bad_records(invalid_df, name)
+
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="bad_records",
+            severity="warning",
+            failed_count=len(invalid_df),
+            details={
+                "bad_records_count": len(invalid_df),
+                "bad_records_file": f"data/bad/{name}_bad_records.csv",
+            },
+        )
+    else:
+        record_passed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="bad_records",
+            severity="warning",
+        )
+
+    if valid_df.empty:
+        record_failed_check(
+            batch_id=batch_id,
+            table_name=table_name,
+            check_name="valid_records_exist",
+            severity="critical",
+            failed_count=1,
+            details={"message": "No valid records after validation"},
+        )
+        raise ValueError(f"No valid data in {name}")
+
+    record_passed_check(
+        batch_id=batch_id,
+        table_name=table_name,
+        check_name="valid_records_exist",
+        severity="critical",
+    )
+
+    df_transformed = apply_transformations(valid_df, cfg.get("transformations"))
+
+    copy_to_postgres(
+        df_transformed,
+        f"stg_{cfg['table']}",
+        batch_id,
+        columns_config=cfg["columns"],
+    )
+
+    logger.info(
+        f"Loaded {len(df_transformed)} records into stg_{cfg['table']}, batch_id={batch_id}"
+    )
+
+def load_staging_table(file_name, batch_id):
     logger = setup_logger()
     config = load_config()
 
-    base_path = os.getenv("DATA_PATH", "data")
+    if file_name not in config["files"]:
+        raise ValueError(f"Unknown file config: {file_name}")
 
-    batch_id = uuid.uuid4()
-    logger.info(f"Starting batch: {batch_id}")
+    cfg = config["files"][file_name]
 
-    start_batch(batch_id)
+    logger.info(f"Starting staging table task: {file_name}, batch_id={batch_id}")
+    process_file_to_staging(file_name, cfg, batch_id)
+    logger.info(f"Finished staging table task: {file_name}, batch_id={batch_id}")
+
+
+def load_core_table(file_name, batch_id):
+    logger = setup_logger()
+    config = load_config()
+
+    if file_name not in config["files"]:
+        raise ValueError(f"Unknown file config: {file_name}")
+
+    table_name = config["files"][file_name]["table"]
+
+    logger.info(
+        f"Starting core table task: file={file_name}, table={table_name}, batch_id={batch_id}"
+    )
+
+    from utils import get_connection
+
+    with get_connection() as conn:
+        load_core_by_table(conn, table_name, batch_id)
+
+    logger.info(
+        f"Finished core table task: file={file_name}, table={table_name}, batch_id={batch_id}"
+    )
+
+
+
+def load_staging_level(level_index, batch_id):
+    logger = setup_logger()
+    config, levels = get_execution_plan()
+
+    level = levels[level_index]
+    logger.info(f"Starting staging level {level_index}: {level}")
+
+    for name in level:
+        cfg = config["files"][name]
+        process_file_to_staging(name, cfg, batch_id)
+
+    logger.info(f"Finished staging level {level_index}")
+
+def load_core_level(level_index, batch_id):
+    logger = setup_logger()
+    config, levels = get_execution_plan()
+
+    level = levels[level_index]
+    logger.info(f"Starting core level {level_index}: {level}")
+
+    from utils import get_connection
+
+    with get_connection() as conn:
+        for file_name in level:
+            table_name = config["files"][file_name]["table"]
+            logger.info(f"Loading core table: {table_name}, batch_id={batch_id}")
+            load_core_by_table(conn, table_name, batch_id)
+
+    logger.info(f"Finished core level {level_index}")
+
+def run_pipeline():
+    """
+    CLI/local full pipeline runner.
+    Airflow should use create_batch/load_staging_level/load_core_level/finish_existing_batch.
+    """
+    logger = setup_logger()
+    batch_id = create_batch()
 
     try:
-        graph = DependencyGraph(config)
-        levels = graph.get_levels()
+        run_preflight()
+        config, levels = get_execution_plan()
 
         logger.info(f"Execution levels: {levels}")
+        logger.info(f"Starting batch: {batch_id}")
 
-        for level in levels:
-            logger.info(f"Processing level: {level}")
+        for level_index in range(len(levels)):
+            load_staging_level(level_index, batch_id)
+            load_core_level(level_index, batch_id)
 
-            for name in level:
-                cfg = config["files"][name]
+        finish_existing_batch(batch_id)
+        logger.info(f"Batch finished successfully: {batch_id}")
 
-                logger.info(f"Processing file: {name}")
-
-                try:
-                    path = os.path.join(base_path, cfg["path"])
-
-                    if not os.path.isfile(path):
-                        logger.warning(f"File not found: {path}")
-                        continue
-
-                    if os.path.getsize(path) == 0:
-                        logger.warning(f"Empty file: {path}")
-                        continue
-
-                    df = extract_csv(path)
-
-                    pk = cfg.get("primary_key")
-
-                    if pk not in df.columns:
-                        raise Exception(f"Primary key '{pk}' not found in file {name}")
-
-                    df.rename(columns={pk: "source_id"}, inplace=True)
-
-                    df = apply_types(df, cfg)
-
-                    errors = validate_schema(df, cfg)
-                    if errors:
-                        logger.error(f"Schema errors in {name}: {errors}")
-                        continue
-
-                    valid_df, invalid_df = split_valid_invalid(df, cfg)
-
-                    if not invalid_df.empty:
-                        logger.warning(f"{len(invalid_df)} bad records in {name}")
-                        save_bad_records(invalid_df, name)
-
-                    if valid_df.empty:
-                        logger.warning(f"No valid data in {name}")
-                        continue
-
-                    df_transformed = apply_transformations(valid_df, cfg.get("transformations"))
-
-                    #load_to_postgres(df_transformed, f"stg_{cfg['table']}")
-                    append_to_postgres(df_transformed, f"stg_{cfg['table']}", batch_id)
-                    logger.info(f"Loaded {len(df_transformed)} records into {cfg['table']}")
-
-                except Exception as e:
-                    logger.exception(f"Critical error in {name}: {str(e)}")
-
-        logger.info("Starting core load")
-        load_core_by_levels(levels, config, batch_id)
-        logger.info("Core load finished")
-
-        finish_batch(batch_id)
     except Exception as e:
-        fail_batch(batch_id, str(e))
+        fail_existing_batch(batch_id, str(e))
         logger.exception(f"Pipeline failed for batch {batch_id}: {e}")
         raise
+
 
 if __name__ == "__main__":
     run_pipeline()

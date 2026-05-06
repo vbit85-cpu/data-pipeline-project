@@ -3,6 +3,7 @@ import os
 import logging
 import psycopg2
 from datetime import datetime
+import time
 
 def get_connection():
     """
