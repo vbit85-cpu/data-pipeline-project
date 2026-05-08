@@ -14,6 +14,7 @@ def check_duplicates(conn, staging_table, batch_id, key_column="source_id"):
         SELECT {key_column}, COUNT(*)
         FROM {staging_table}
         WHERE batch_id = %s
+          AND NULLIF({key_column}, '') IS NOT NULL
         GROUP BY {key_column}
         HAVING COUNT(*) > 1
         ORDER BY COUNT(*) DESC;
@@ -61,7 +62,7 @@ def check_missing_references(conn, staging_table, source_column, ref_table, batc
         SELECT s.{source_column}, COUNT(*)
         FROM {staging_table} s
         LEFT JOIN {ref_table} r
-            ON s.{source_column} = r.{ref_source_column}
+            ON NULLIF(s.{source_column}, '')::double precision::int = r.{ref_source_column}
         WHERE r.{ref_source_column} IS NULL
           AND s.batch_id = %s
         GROUP BY s.{source_column}
@@ -115,9 +116,9 @@ def check_invalid_agent_pairs(conn, batch_id):
             s.ag_ch_id
         FROM stg_orders s
         LEFT JOIN agents parent_ag
-            ON s.ag_id = parent_ag.source_id
+            ON NULLIF(s.ag_id, '')::double precision::int = parent_ag.source_id
         LEFT JOIN agents child_ag
-            ON s.ag_ch_id = child_ag.source_id
+            ON NULLIF(s.ag_ch_id, '')::double precision::int = child_ag.source_id
         WHERE s.batch_id = %s
           AND (
               parent_ag.id IS NULL
@@ -171,16 +172,16 @@ def load_entities_core(conn, batch_id):
 
     query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 ent_name
             FROM stg_entities
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO entities (source_id, ent_name)
-        SELECT source_id, ent_name
+        SELECT NULLIF(source_id,'')::double precision::int, ent_name
         FROM latest
         ON CONFLICT (source_id) DO UPDATE
         SET ent_name = EXCLUDED.ent_name;
@@ -194,18 +195,18 @@ def load_agents_core(conn, batch_id):
 
     insert_query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 parent_id,
                 ag_name
             FROM stg_agents
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO agents (source_id, parent_id, ag_name)
         SELECT
-            source_id,
+            NULLIF(source_id,'')::double precision::int,
             NULL AS parent_id,
             ag_name
         FROM latest
@@ -216,20 +217,20 @@ def load_agents_core(conn, batch_id):
 
     update_parent_query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 parent_id
             FROM stg_agents
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         UPDATE agents child
         SET parent_id = parent.id
         FROM latest l
         LEFT JOIN agents parent
-            ON l.parent_id = parent.source_id
-        WHERE child.source_id = l.source_id;
+            ON NULLIF(l.parent_id,'')::double precision::int = parent.source_id
+        WHERE child.source_id = NULLIF(l.source_id,'')::int;
     """
 
     _execute(conn, insert_query, "agents insert", (str(batch_id),))
@@ -241,17 +242,17 @@ def load_users_core(conn, batch_id):
 
     query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 username,
                 email
             FROM stg_users
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO users (source_id, username, email)
-        SELECT source_id, username, email
+        SELECT NULLIF(source_id,'')::double precision::int, username, email
         FROM latest
         ON CONFLICT (source_id) DO UPDATE
         SET
@@ -267,18 +268,21 @@ def load_employees_core(conn, batch_id):
 
     query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 name,
                 department,
                 salary
             FROM stg_employees
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO employees (source_id, name, department, salary)
-        SELECT source_id, name, department, salary
+        SELECT NULLIF(source_id,'')::double precision::int, 
+            name,
+            department,
+            NULLIF(salary,'')::double precision
         FROM latest
         ON CONFLICT (source_id) DO UPDATE
         SET
@@ -309,7 +313,7 @@ def load_orders_core(conn, batch_id):
 
     query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 ent_id,
                 order_qty,
@@ -318,9 +322,9 @@ def load_orders_core(conn, batch_id):
                 ag_id,
                 ag_ch_id
             FROM stg_orders
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO orders (
             source_id,
@@ -332,20 +336,20 @@ def load_orders_core(conn, batch_id):
             ag_ch_id
         )
         SELECT distinct
-            l.source_id,
+            NULLIF(l.source_id,'')::double precision::int,
             e.id AS ent_id,
-            l.order_qty,
-            l.price,
-            l.order_sum,
+            NULLIF(l.order_qty,'')::double precision,
+            NULLIF(l.price,'')::double precision,
+            NULLIF(l.order_sum,'')::double precision,
             parent_ag.id AS ag_id,
             child_ag.id AS ag_ch_id
         FROM latest l
         JOIN entities e
-            ON l.ent_id = e.source_id
+            ON NULLIF(l.ent_id,'')::double precision::int = e.source_id
         JOIN agents parent_ag
-            ON l.ag_id = parent_ag.source_id
+            ON NULLIF(l.ag_id,'')::double precision::int = parent_ag.source_id
         JOIN agents child_ag
-            ON l.ag_ch_id = child_ag.source_id
+            ON NULLIF(l.ag_ch_id,'')::double precision::int = child_ag.source_id
            AND child_ag.parent_id = parent_ag.id
         ON CONFLICT (source_id) DO UPDATE
         SET
@@ -370,7 +374,7 @@ def load_incomes_core(conn, batch_id):
 
     query = """
         WITH latest AS (
-            SELECT DISTINCT ON (source_id)
+            SELECT DISTINCT ON (NULLIF(source_id,'')::double precision::int)
                 source_id,
                 ent_id,
                 ag_id,
@@ -378,9 +382,9 @@ def load_incomes_core(conn, batch_id):
                 income_price,
                 income_sum
             FROM stg_incomes
-            WHERE source_id IS NOT NULL
+            WHERE NULLIF(source_id,'') IS NOT NULL
               AND batch_id = %s
-            ORDER BY source_id, loaded_at DESC, stg_id DESC
+            ORDER BY NULLIF(source_id,'')::double precision::int, loaded_at DESC, stg_id DESC
         )
         INSERT INTO incomes (
             source_id,
@@ -391,15 +395,15 @@ def load_incomes_core(conn, batch_id):
             income_sum
         )
         SELECT
-            l.source_id,
+            NULLIF(l.source_id,'')::double precision::int,
             e.id AS ent_id,
             a.id AS ag_id,
-            l.income_qty,
-            l.income_price,
-            l.income_sum
+            NULLIF(l.income_qty,'')::double precision,
+            NULLIF(l.income_price,'')::double precision,
+            NULLIF(l.income_sum,'')::double precision
         FROM latest l
-        JOIN entities e ON l.ent_id = e.source_id
-        JOIN agents a ON l.ag_id = a.source_id
+        JOIN entities e ON NULLIF(l.ent_id,'')::double precision::int = e.source_id
+        JOIN agents a ON NULLIF(l.ag_id,'')::double precision::int = a.source_id
         ON CONFLICT (source_id) DO UPDATE
         SET
             ent_id = EXCLUDED.ent_id,

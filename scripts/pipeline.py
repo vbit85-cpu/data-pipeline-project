@@ -39,7 +39,22 @@ def get_execution_plan():
     return config, levels
 
 def create_batch():
-    batch_id = uuid.uuid4()
+    """
+    Normal mode:
+    - creates a new batch_id.
+
+    Test/retry mode:
+    - if BATCH_ID env var is provided, uses it.
+    - useful for local idempotency testing.
+    """
+
+    forced_batch_id = os.getenv("BATCH_ID")
+
+    if forced_batch_id:
+        batch_id = forced_batch_id
+    else:
+        batch_id = str(uuid.uuid4())
+
     start_batch(batch_id)
     return str(batch_id)
 
@@ -54,10 +69,11 @@ def process_file_to_staging(name, cfg, batch_id):
     logger = setup_logger()
     base_path = os.getenv("DATA_PATH", "data")
     table_name = cfg["table"]
+    source_file = cfg["path"]
 
     logger.info(f"Processing file: {name}, batch_id={batch_id}")
 
-    path = os.path.join(base_path, cfg["path"])
+    path = os.path.join(base_path, source_file)
 
     if not os.path.isfile(path):
         record_failed_check(
@@ -96,6 +112,7 @@ def process_file_to_staging(name, cfg, batch_id):
     )
 
     df = extract_csv(path)
+    df["__source_row_number"] = df.index + 2
 
     pk = cfg.get("primary_key")
 
@@ -124,7 +141,12 @@ def process_file_to_staging(name, cfg, batch_id):
 
     df = apply_types(df, cfg)
 
-    errors = validate_schema(df, cfg)
+    technical_columns = [col for col in df.columns if col.startswith("__")]
+
+    validation_df = df.drop(columns=technical_columns, errors="ignore")
+
+    errors = validate_schema(validation_df, cfg)
+
 
     if errors:
         record_failed_check(
@@ -189,20 +211,24 @@ def process_file_to_staging(name, cfg, batch_id):
 
     df_transformed = apply_transformations(valid_df, cfg.get("transformations"))
 
-    copy_to_postgres(
-        df_transformed,
-        f"stg_{cfg['table']}",
-        batch_id,
+    inserted_rows = copy_to_postgres(
+        df=df_transformed,
+        table_name=f"stg_{cfg['table']}",
+        batch_id=batch_id,
         columns_config=cfg["columns"],
+        source_file=source_file,
     )
 
     logger.info(
-        f"Loaded {len(df_transformed)} records into stg_{cfg['table']}, batch_id={batch_id}"
+        f"Loaded {inserted_rows} new records into stg_{cfg['table']}, "
+        f"batch_id={batch_id}"
     )
+
 
 def load_staging_table(file_name, batch_id):
     logger = setup_logger()
     config = load_config()
+    validate_mappings_contract(config)
 
     if file_name not in config["files"]:
         raise ValueError(f"Unknown file config: {file_name}")
@@ -217,6 +243,7 @@ def load_staging_table(file_name, batch_id):
 def load_core_table(file_name, batch_id):
     logger = setup_logger()
     config = load_config()
+    validate_mappings_contract(config)
 
     if file_name not in config["files"]:
         raise ValueError(f"Unknown file config: {file_name}")

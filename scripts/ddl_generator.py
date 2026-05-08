@@ -47,9 +47,12 @@ def generate_staging_table_sql(table_name: str, columns: dict) -> str:
     staging_table_name = f"stg_{table_name}"
 
     column_lines = [
-        "    stg_id BIGSERIAL PRIMARY KEY",
-        "    batch_id UUID NOT NULL",
-        "    loaded_at TIMESTAMP DEFAULT now()",
+    "    stg_id BIGSERIAL PRIMARY KEY",
+    "    batch_id UUID NOT NULL",
+    "    source_file TEXT NOT NULL",
+    "    source_row_number BIGINT NOT NULL",
+    "    loaded_at TIMESTAMP DEFAULT now()",
+    "    raw_record JSONB"
     ]
 
     for column_name, column_cfg in columns.items():
@@ -58,13 +61,18 @@ def generate_staging_table_sql(table_name: str, columns: dict) -> str:
         column_type = column_cfg["type"]
         postgres_type = POSTGRES_TYPE_MAPPING[column_type]
 
-        column_lines.append(f"    {column_name} {postgres_type}")
+        column_lines.append(f"    {column_name} TEXT")
 
     columns_sql = ",\n".join(column_lines)
 
+    constraint_name = f"uq_stg_{table_name}_batch_file_row"
+
     return f"""CREATE TABLE IF NOT EXISTS {staging_table_name} (
-{columns_sql}
+{columns_sql},
+    CONSTRAINT {constraint_name}
+    UNIQUE (batch_id, source_file, source_row_number)
 );"""
+
 
 
 def generate_all_staging_sql(config: dict) -> str:
@@ -119,7 +127,10 @@ def ensure_staging_tables(config: dict):
                 column_definitions = [
                     sql.SQL("stg_id BIGSERIAL PRIMARY KEY"),
                     sql.SQL("batch_id UUID NOT NULL"),
+                    sql.SQL("source_file TEXT NOT NULL"),
+                    sql.SQL("source_row_number BIGINT NOT NULL"),
                     sql.SQL("loaded_at TIMESTAMP DEFAULT now()"),
+                    sql.SQL("raw_record JSONB")
                 ]
 
                 for column_name, column_cfg in file_cfg["columns"].items():
@@ -128,11 +139,11 @@ def ensure_staging_tables(config: dict):
                     postgres_type = POSTGRES_TYPE_MAPPING[column_cfg["type"]]
 
                     column_definitions.append(
-                        sql.SQL("{} {}").format(
+                        sql.SQL("{} TEXT").format(
                             sql.Identifier(column_name),
-                            sql.SQL(postgres_type),
                         )
                     )
+
 
                 create_table_query = sql.SQL("""
                     CREATE TABLE IF NOT EXISTS {} (
@@ -144,6 +155,27 @@ def ensure_staging_tables(config: dict):
                 )
 
                 cur.execute(create_table_query)
+                constraint_name = f"uq_{staging_table_name}_batch_file_row"
+                cur.execute(
+                    sql.SQL("""
+                        DO $$
+                        BEGIN
+                            IF NOT EXISTS (
+                               SELECT 1
+                               FROM pg_constraint
+                               WHERE conname = %s
+                            ) THEN
+                                ALTER TABLE {} ADD CONSTRAINT {} 
+                                UNIQUE (batch_id, source_file, source_row_number);
+                            END IF;
+                        END
+                        $$;
+                    """).format(
+                        sql.Identifier(staging_table_name),
+                        sql.Identifier(constraint_name),
+                    ),
+                    [constraint_name],
+                )
 
         conn.commit()
 
