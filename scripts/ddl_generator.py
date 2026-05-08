@@ -204,6 +204,12 @@ def main():
         help="Output SQL file path",
     )
 
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply generated staging DDL directly to PostgreSQL",
+    )
+
     args = parser.parse_args()
 
     config = load_config_from_path(args.config)
