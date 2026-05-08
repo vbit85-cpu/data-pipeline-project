@@ -32,7 +32,8 @@ services:
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
       - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
+      - airflow_logs:/opt/airflow/logs
+      - airflow_bad_records:/opt/airflow/data/bad
     command: >
       bash -c "
       airflow db migrate &&
@@ -69,7 +70,8 @@ services:
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
       - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
+      - airflow_logs:/opt/airflow/logs
+      - airflow_bad_records:/opt/airflow/data/bad
     ports:
       - "8080:8080"
     command: webserver
@@ -97,8 +99,11 @@ services:
       - ./dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
       - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
+      - airflow_logs:/opt/airflow/logs
+      - airflow_bad_records:/opt/airflow/data/bad
     command: scheduler
 
 volumes:
   postgres_data:
+  airflow_logs:
+  airflow_bad_records:

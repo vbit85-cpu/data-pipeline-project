@@ -1,230 +1,203 @@
 import io
-import re
+import json
+import uuid
+from typing import Any, Dict, List, Optional
 
-import logging
-import os
-import time
 import pandas as pd
 from psycopg2 import sql
+
 from utils import get_connection
-from psycopg2.extras import execute_values
 
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESERVED_STAGING_COLUMNS = [
+    "batch_id",
+    "source_file",
+    "source_row_number",
+    "loaded_at",
+    "raw_record",
+]
 
 
-def _validate_identifier(identifier: str):
-    """
-    Protects dynamic SQL identifiers like table names and column names.
-
-    PostgreSQL identifiers should not be blindly interpolated into SQL strings.
-    This validation is intentionally strict.
-    """
-    if not _IDENTIFIER_RE.match(identifier):
-        raise ValueError(f"Unsafe SQL identifier: {identifier}")
+class LoadError(Exception):
+    pass
 
 
-def _prepare_dataframe_for_load(df: pd.DataFrame, batch_id):
-    """
-    Adds batch_id and converts pandas NA/NaN values into None-compatible form.
+def quote_table_name(table_name: str) -> sql.Identifier:
+    if not isinstance(table_name, str) or not table_name.strip():
+        raise LoadError("table_name must be a non-empty string")
 
-    PostgreSQL COPY will receive missing values as \\N.
-    """
+    return sql.Identifier(table_name)
+
+
+def _prepare_staging_dataframe(
+    df,
+    batch_id,
+    source_file,
+    columns_config,
+):
     if df.empty:
-        return df.copy()
+        raise LoadError("Cannot load empty dataframe to staging")
 
-    prepared_df = df.copy()
-    prepared_df["batch_id"] = str(batch_id)
+    if not source_file:
+        raise LoadError("source_file must be provided")
 
-    prepared_df = prepared_df.astype(object)
-    prepared_df = prepared_df.where(pd.notnull(prepared_df), None)
+    normalized_columns = list(columns_config.keys())
 
-    return prepared_df
+    missing_columns = [col for col in normalized_columns if col not in df.columns]
+    if missing_columns:
+        raise LoadError(
+            f"DataFrame is missing normalized columns required by mappings: {missing_columns}"
+        )
+
+    result = pd.DataFrame(index=df.index)
+
+    result["batch_id"] = str(batch_id)
+    result["source_file"] = source_file
+
+    if "__source_row_number" in df.columns:
+        result["source_row_number"] = df["__source_row_number"].astype("int64")
+    else:
+        result["source_row_number"] = range(1, len(df) + 1)
+
+    for col in normalized_columns:
+        result[col] = df[col]
+
+    raw_columns = [col for col in df.columns if not col.startswith("__")]
+
+    result["raw_record"] = df[raw_columns].apply(
+        lambda row: json.dumps(row.where(pd.notnull(row), None).to_dict(), default=str),
+        axis=1,
+    )
+
+    return result
 
 
-def copy_to_postgres(df: pd.DataFrame, table_name: str, batch_id, columns_config=None):
+def _copy_dataframe_to_table(
+    cursor,
+    df: pd.DataFrame,
+    table_name: str,
+    columns: List[str],
+) -> None:
     """
-    Bulk-loads dataframe into PostgreSQL using COPY.
-
-    This function is intended for staging tables only:
-        stg_entities
-        stg_agents
-        stg_orders
-        ...
-
+    Uses PostgreSQL COPY FROM STDIN for fast loading.
     """
-
-    if df.empty:
-        return
-
-    _validate_identifier(table_name)
-
-    prepared_df = _prepare_dataframe_for_load(df, batch_id)
-
-    if columns_config:
-        for column, meta in columns_config.items():
-            if column not in prepared_df.columns:
-                continue
-
-            if meta.get("type") == "int":
-                prepared_df[column] = prepared_df[column].apply(
-                    lambda x: None if pd.isna(x) else str(int(x))
-                )
-
-            elif meta.get("type") == "float":
-                prepared_df[column] = prepared_df[column].apply(
-                    lambda x: None if pd.isna(x) else str(float(x))
-                )
-
-            elif meta.get("type") == "string":
-                prepared_df[column] = prepared_df[column].apply(
-                    lambda x: None if pd.isna(x) else str(x)
-                )
-
-    columns = list(prepared_df.columns)
-
-    for column in columns:
-        _validate_identifier(column)
 
     buffer = io.StringIO()
 
-    prepared_df.to_csv(
+    copy_df = df[columns].copy()
+    copy_df = copy_df.where(pd.notnull(copy_df), None)
+
+    copy_df.to_csv(
         buffer,
         index=False,
-        header=True,
+        header=False,
+        sep="\t",
         na_rep="\\N",
     )
 
     buffer.seek(0)
 
-    conn = get_connection()
+    copy_sql = sql.SQL(
+        """
+        COPY {table} ({columns})
+        FROM STDIN
+        WITH (
+            FORMAT csv,
+            DELIMITER E'\t',
+            NULL '\\N',
+            QUOTE '"',
+            ESCAPE '"'
+        )
+        """
+    ).format(
+        table=quote_table_name(table_name),
+        columns=sql.SQL(", ").join(sql.Identifier(col) for col in columns),
+    )
 
-    try:
+    cursor.copy_expert(copy_sql.as_string(cursor), buffer)
+
+
+def copy_to_postgres(
+    df: pd.DataFrame,
+    table_name: str,
+    batch_id: str,
+    columns_config: Dict[str, Any],
+    source_file: Optional[str] = None
+) -> int:
+    """
+    Idempotent staging load.
+
+    Strategy:
+    1. Prepare dataframe with metadata columns.
+    2. COPY dataframe into temporary table.
+    3. INSERT from temporary table into target stg table.
+    4. ON CONFLICT(batch_id, source_file, source_row_number) DO NOTHING.
+
+    This makes Airflow retries safe for the same batch_id.
+    """
+
+    source_file = source_file or table_name
+
+    staging_df = _prepare_staging_dataframe(
+        df=df,
+        batch_id=batch_id,
+        source_file=source_file,
+        columns_config=columns_config,
+    )
+
+    temp_table = f"tmp_{table_name}_{uuid.uuid4().hex[:12]}"
+
+    business_columns = list(columns_config.keys())
+
+    insert_columns = [
+        "batch_id",
+        "source_file",
+        "source_row_number",
+        *business_columns,
+        "raw_record",
+    ]
+
+    with get_connection() as conn:
         with conn.cursor() as cur:
-            copy_sql = sql.SQL("""
-                COPY {table_name} ({columns})
-                FROM STDIN
-                WITH (
-                    FORMAT CSV,
-                    HEADER TRUE,
-                    NULL '\\N'
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TEMP TABLE {temp_table}
+                    (LIKE {target_table} INCLUDING DEFAULTS)
+                    ON COMMIT DROP
+                    """
+                ).format(
+                    temp_table=quote_table_name(temp_table),
+                    target_table=quote_table_name(table_name),
                 )
-            """).format(
-                table_name=sql.Identifier(table_name),
+            )
+
+            _copy_dataframe_to_table(
+                cursor=cur,
+                df=staging_df,
+                table_name=temp_table,
+                columns=insert_columns,
+            )
+
+            insert_sql = sql.SQL(
+                """
+                INSERT INTO {target_table} ({columns})
+                SELECT {columns}
+                FROM {temp_table}
+                ON CONFLICT (batch_id, source_file, source_row_number)
+                DO NOTHING
+                """
+            ).format(
+                target_table=quote_table_name(table_name),
+                temp_table=quote_table_name(temp_table),
                 columns=sql.SQL(", ").join(
-                    sql.Identifier(column) for column in columns
+                    sql.Identifier(col) for col in insert_columns
                 ),
             )
 
-            cur.copy_expert(copy_sql.as_string(conn), buffer)
+            cur.execute(insert_sql)
+            inserted_rows = cur.rowcount
 
         conn.commit()
 
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
-
-def append_to_postgres(df: pd.DataFrame, table_name: str, batch_id):
-    if df.empty:
-        return
-
-    _validate_identifier(table_name)
-    prepared_df = _prepare_dataframe_for_load(df, batch_id)
-
-    columns = list(prepared_df.columns)
-
-    for column in columns:
-        _validate_identifier(column)
-
-    query = sql.SQL("""
-        INSERT INTO {table_name} ({columns})
-        VALUES %s
-    """).format(
-        table_name=sql.Identifier(table_name),
-        columns=sql.SQL(", ").join(
-            sql.Identifier(column) for column in columns
-        ),
-    )
-
-    values = list(prepared_df.itertuples(index=False, name=None))
-
-    conn = get_connection()
-
-    try:
-        with conn.cursor() as cur:
-            execute_values(cur, query.as_string(conn), values)
-
-        conn.commit()
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
-
-
-def load_to_postgres(df, table_name, batch_size=1000):
-    """
-    Fast batch insert using execute_values.
-    """
-
-    if df.empty:
-        logging.warning(f"No data to load into {table_name}")
-        return
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Convert pandas/numpy types → native Python types
-    df = df.where(pd.notnull(df), None)   # replace NaN with None
-    df = df.astype(object)                # convert numpy types → python
-
-    values = [tuple(row) for row in df.to_numpy()]
-
-    # Extract column names
-    columns = list(df.columns)
-    columns_str = ", ".join(columns)
-
-    # --- Build UPDATE part dynamically ---
-    update_columns = [col for col in columns if col != "source_id"]
-
-    update_str = ", ".join([
-        f"{col} = EXCLUDED.{col}" for col in update_columns
-    ])
-
-    # SQL template
-    query = f"""
-        INSERT INTO {table_name} ({columns_str})
-        VALUES %s
-        ON CONFLICT (source_id)
-        DO UPDATE SET
-        {update_str}
-    """
-
-    try:
-        # Batch insert
-        execute_values(
-            cursor,
-            query,
-            values,
-            page_size=batch_size
-        )
-
-        conn.commit()
-        logging.info(f"Inserted {len(values)} rows into {table_name}")
-
-    except Exception as e:
-        conn.rollback()
-        logging.exception(f"Error inserting into {table_name}: {e}")
-        raise
-
-    finally:
-        cursor.close()
-        conn.close()
-
-
-
+    return inserted_rows

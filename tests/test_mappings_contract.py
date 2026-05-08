@@ -6,8 +6,7 @@ from scripts.config_contract import validate_mappings_contract
 
 CONFIG_PATH = Path("configs/mappings.yaml")
 
-ALLOWED_TYPES = {"int", "float", "string"}
-
+ALLOWED_TYPES = {"int", "float", "string", "date", "datetime", "bool"}
 
 def load_mappings():
     assert CONFIG_PATH.exists(), f"Config file not found: {CONFIG_PATH}"
