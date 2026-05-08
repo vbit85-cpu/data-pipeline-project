@@ -12,13 +12,6 @@ def get_connection():
 
     for attempt in range(5):
         try:
-            #conn = psycopg2.connect(
-             #   host=os.getenv("DB_HOST", "localhost"),
-            #    database="airflow",
-            #    user="airflow",
-            #    password="airflow",
-            #    port=5432
-            #)
              conn = psycopg2.connect(
                  host=os.getenv("POSTGRES_HOST", "localhost"),
                  port=os.getenv("POSTGRES_PORT", "5432"),

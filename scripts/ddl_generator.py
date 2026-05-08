@@ -9,8 +9,6 @@ import yaml
 from psycopg2 import sql
 
 
-ALLOWED_TYPES = {"int", "float", "string"}
-
 POSTGRES_TYPE_MAPPING = {
     "int": "INT",
     "float": "DOUBLE PRECISION",
@@ -202,6 +200,12 @@ def main():
         "--output",
         default="generated/staging_tables.sql",
         help="Output SQL file path",
+    )
+
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply generated staging DDL directly to PostgreSQL",
     )
 
     args = parser.parse_args()
