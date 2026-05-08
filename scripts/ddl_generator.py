@@ -9,8 +9,6 @@ import yaml
 from psycopg2 import sql
 
 
-ALLOWED_TYPES = {"int", "float", "string"}
-
 POSTGRES_TYPE_MAPPING = {
     "int": "INT",
     "float": "DOUBLE PRECISION",
