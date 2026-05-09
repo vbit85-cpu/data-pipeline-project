@@ -1,4 +1,4 @@
-# Production-like ETL Pipeline (CSV → PostgreSQL → Airflow)
+# Production-like ETL Pipeline (Python, PostgreSQL, Airflow)
 ![Tests](https://github.com/vbit85-cpu/data-pipeline-project/actions/workflows/tests.yml/badge.svg)
 
 ## Overview
