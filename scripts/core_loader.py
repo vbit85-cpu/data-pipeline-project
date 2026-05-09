@@ -335,7 +335,7 @@ def load_orders_core(conn, batch_id):
             ag_id,
             ag_ch_id
         )
-        SELECT distinct
+        SELECT
             NULLIF(l.source_id,'')::double precision::int,
             e.id AS ent_id,
             NULLIF(l.order_qty,'')::double precision,
