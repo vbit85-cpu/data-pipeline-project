@@ -25,19 +25,19 @@ CSV → validation → bad records → staging → core → audit + qualité
 
 ```mermaid
 flowchart TD
-    A[Fichiers CSV] --> B[Extraction & Validation]
+    A[Fichiers CSV] --> B[Extraction et Validation]
 
     B -->|lignes invalides| C[Stockage des erreurs]
 
-    B -->|lignes valides| D[Staging (stg_*)]
-    D -->|batch_id + tracking| E[Chargement idempotent]
+    B -->|lignes valides| D[Staging stg]
+    D -->|batch_id + row_number| E[Chargement idempotent]
 
     E --> F[Couche Core]
 
-    F --> G[Mapping FK<br/>source_id → id]
+    F --> G[Mapping FK source_id vers id]
 
     G --> H[Audit]
-    G --> I[Qualité des données]
+    G --> I[Qualite des donnees]
 
     J[DAG Airflow] --> B
     J --> D

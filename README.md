@@ -24,20 +24,20 @@ CSV → validation → bad records → staging → core → audit + data quality
 
 ```mermaid
 flowchart TD
-    A[CSV Files] --> B[Extract & Validation]
-	
+    A[CSV Files] --> B[Extract and Validation]
+
     B -->|invalid rows| C[Bad Records Storage]
-	
-    B -->|valid rows| D[Staging Layer (stg_*)]
-    D -->|batch_id + source_row_number| E[Idempotent Load<br/>ON CONFLICT DO NOTHING]
-	
+
+    B -->|valid rows| D[Staging Layer stg]
+    D -->|batch_id + row_number| E[Idempotent Load - ON CONFLICT]
+
     E --> F[Core Layer]
-	
-    F --> G[FK Mapping<br/>source_id → id]
-	
-    G --> H[Audit Tables<br/>etl_batches]
-    G --> I[Data Quality<br/>etl_quality_checks]
-	
+
+    F --> G[FK Mapping source_id to id]
+
+    G --> H[Audit Tables etl_batches]
+    G --> I[Data Quality etl_quality_checks]
+
     J[Airflow DAG] --> B
     J --> D
     J --> F
